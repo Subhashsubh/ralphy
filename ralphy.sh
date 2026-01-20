@@ -2173,6 +2173,7 @@ Focus only on implementing: $task_name"
         (
           cd "$worktree_dir"
           OPENCODE_PERMISSION='{"*":"allow"}' opencode run \
+            ${MODEL_OVERRIDE:+--model "$MODEL_OVERRIDE"} \
             --format json \
             "$prompt"
         ) > "$tmpfile" 2>>"$log_file"
@@ -2771,6 +2772,7 @@ Be careful to preserve functionality from BOTH branches. The goal is to integrat
           case "$AI_ENGINE" in
             opencode)
               OPENCODE_PERMISSION='{"*":"allow"}' opencode run \
+                ${MODEL_OVERRIDE:+--model "$MODEL_OVERRIDE"} \
                 --format json \
                 "$resolve_prompt" > "$resolve_tmpfile" 2>&1
               ;;
