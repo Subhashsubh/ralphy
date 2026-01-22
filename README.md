@@ -276,6 +276,9 @@ capabilities:
 
 ## Changelog
 
+### v4.4.0
+- GitHub Copilot CLI support (`--copilot`)
+
 ### v4.3.0
 - model override: `--model <name>` flag to override model for any engine
 - `--sonnet` shortcut for `--claude --model sonnet`
