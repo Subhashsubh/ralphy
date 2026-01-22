@@ -6,9 +6,11 @@ import type { AIEngine, AIResult } from "../engines/types.ts";
 import { getCurrentBranch, returnToBaseBranch } from "../git/branch.ts";
 import {
 	abortMerge,
+	analyzePreMerge,
 	createIntegrationBranch,
 	deleteLocalBranch,
 	mergeAgentBranch,
+	sortByConflictLikelihood,
 } from "../git/merge.ts";
 import { cleanupAgentWorktree, createAgentWorktree, getWorktreeBase } from "../git/worktree.ts";
 import { CachedTaskSource } from "../tasks/cached-task-source.ts";
@@ -334,7 +336,13 @@ export async function runParallel(
 }
 
 /**
- * Merge completed branches back to the base branch
+ * Merge completed branches back to the base branch.
+ *
+ * Optimized merge phase:
+ * 1. Parallel pre-merge analysis (git diff doesn't require locks)
+ * 2. Sort branches by conflict likelihood (merge clean ones first)
+ * 3. Sequential merges (git locking requirement)
+ * 4. Parallel branch deletion
  */
 async function mergeCompletedBranches(
 	branches: string[],
@@ -350,11 +358,30 @@ async function mergeCompletedBranches(
 
 	logInfo(`\nMerge phase: merging ${branches.length} branch(es) into ${targetBranch}`);
 
+	// Stage 1: Parallel pre-merge analysis
+	// Run git diff for all branches in parallel (doesn't require locks)
+	logDebug("Analyzing branches for potential conflicts...");
+	const analyses = await Promise.all(
+		branches.map((branch) => analyzePreMerge(branch, targetBranch, workDir)),
+	);
+
+	// Stage 2: Sort by conflict likelihood (merge clean ones first)
+	// This reduces the chance of early conflicts blocking later clean merges
+	const sortedAnalyses = sortByConflictLikelihood(analyses);
+	const sortedBranches = sortedAnalyses.map((a) => a.branch);
+
+	if (sortedBranches[0] !== branches[0]) {
+		logDebug("Reordered branches to minimize conflicts");
+	}
+
+	// Stage 3: Sequential merges (git operations require this)
 	const merged: string[] = [];
 	const failed: string[] = [];
 
-	for (const branch of branches) {
-		logInfo(`Merging ${branch}...`);
+	for (const branch of sortedBranches) {
+		const analysis = analyses.find((a) => a.branch === branch);
+		const fileCount = analysis?.fileCount ?? 0;
+		logInfo(`Merging ${branch}... (${fileCount} file${fileCount === 1 ? "" : "s"} changed)`);
 
 		const mergeResult = await mergeAgentBranch(branch, targetBranch, workDir);
 
@@ -388,11 +415,20 @@ async function mergeCompletedBranches(
 		}
 	}
 
-	// Delete successfully merged branches
-	for (const branch of merged) {
-		const deleted = await deleteLocalBranch(branch, workDir, true);
-		if (deleted) {
-			logDebug(`Deleted merged branch: ${branch}`);
+	// Stage 4: Parallel branch deletion
+	// Delete all successfully merged branches in parallel
+	if (merged.length > 0) {
+		const deleteResults = await Promise.all(
+			merged.map(async (branch) => {
+				const deleted = await deleteLocalBranch(branch, workDir, true);
+				return { branch, deleted };
+			}),
+		);
+
+		for (const { branch, deleted } of deleteResults) {
+			if (deleted) {
+				logDebug(`Deleted merged branch: ${branch}`);
+			}
 		}
 	}
 
