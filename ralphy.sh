@@ -645,7 +645,9 @@ run_brownfield_task() {
         "$prompt" 2>&1 | tee "$output_file"
       ;;
     copilot)
-      copilot -p "$prompt" 2>&1 | tee "$output_file"
+      copilot -p "$prompt" \
+        ${MODEL_OVERRIDE:+--model "$MODEL_OVERRIDE"} \
+        2>&1 | tee "$output_file"
       ;;
     codex)
       codex exec --full-auto \
@@ -1671,7 +1673,9 @@ run_ai_command() {
       ;;
     copilot)
       # Copilot: use -p flag for programmatic prompt
-      copilot -p "$prompt" > "$output_file" 2>&1 &
+      copilot -p "$prompt" \
+        ${MODEL_OVERRIDE:+--model "$MODEL_OVERRIDE"} \
+        > "$output_file" 2>&1 &
       ;;
     codex)
       CODEX_LAST_MESSAGE_FILE="${output_file}.last"
@@ -2236,7 +2240,8 @@ Focus only on implementing: $task_name"
       copilot)
         (
           cd "$worktree_dir"
-          copilot -p "$prompt"
+          copilot -p "$prompt" \
+            ${MODEL_OVERRIDE:+--model "$MODEL_OVERRIDE"}
         ) > "$tmpfile" 2>>"$log_file"
         ;;
       codex)
@@ -2829,7 +2834,9 @@ Be careful to preserve functionality from BOTH branches. The goal is to integrat
                 "$resolve_prompt" > "$resolve_tmpfile" 2>&1
               ;;
             copilot)
-              copilot -p "$resolve_prompt" > "$resolve_tmpfile" 2>&1
+              copilot -p "$resolve_prompt" \
+                ${MODEL_OVERRIDE:+--model "$MODEL_OVERRIDE"} \
+                > "$resolve_tmpfile" 2>&1
               ;;
             codex)
               codex exec --full-auto \
