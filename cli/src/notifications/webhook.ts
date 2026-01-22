@@ -117,11 +117,11 @@ export async function sendNotifications(
 		return;
 	}
 
-	if (discord_webhook && discord_webhook.trim() !== "") {
+	const { discord_webhook, slack_webhook, custom_webhook } = config.notifications;
 
 	const tasks: Promise<void>[] = [];
 
-	if (discord_webhook) {
+	if (discord_webhook && discord_webhook.trim() !== "") {
 		tasks.push(
 			sendDiscordNotification(discord_webhook, status, result).catch((err) => {
 				logError(`Discord notification failed: ${err.message}`);
