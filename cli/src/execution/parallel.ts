@@ -630,28 +630,30 @@ export async function runParallel(
 			logWarn(`Failed to stash local changes: ${stashErr}`);
 		}
 
-		await mergeCompletedBranches(
-			completedBranches,
-			originalBaseBranch,
-			engine,
-			workDir,
-			modelOverride,
-			engineArgs,
-		);
+		try {
+			await mergeCompletedBranches(
+				completedBranches,
+				originalBaseBranch,
+				engine,
+				workDir,
+				modelOverride,
+				engineArgs,
+			);
 
-		// Restore starting branch if we're not already on it
-		const currentBranch = await getCurrentBranch(workDir);
-		if (currentBranch !== startingBranch) {
-			logDebug(`Restoring starting branch: ${startingBranch}`);
-			await returnToBaseBranch(startingBranch, workDir);
-		}
-
-		if (stashed) {
-			try {
-				await git.stash(["pop"]);
-				logDebug("Restored stashed changes after merge phase");
-			} catch (stashErr) {
-				logWarn(`Failed to restore stashed changes: ${stashErr}`);
+			// Restore starting branch if we're not already on it
+			const currentBranch = await getCurrentBranch(workDir);
+			if (currentBranch !== startingBranch) {
+				logDebug(`Restoring starting branch: ${startingBranch}`);
+				await returnToBaseBranch(startingBranch, workDir);
+			}
+		} finally {
+			if (stashed) {
+				try {
+					await git.stash(["pop"]);
+					logDebug("Restored stashed changes after merge phase");
+				} catch (stashErr) {
+					logWarn(`Failed to restore stashed changes: ${stashErr}`);
+				}
 			}
 		}
 	}
