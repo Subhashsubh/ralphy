@@ -17,6 +17,7 @@ import { logDebug } from "../ui/logger.ts";
 /**
  * Default directories to symlink (read-only dependencies).
  * These are never modified by agents, so sharing them saves disk space.
+ * Note: build/dist are NOT symlinked to allow agents to run independent builds.
  */
 export const DEFAULT_SYMLINK_DIRS = [
 	"node_modules",
@@ -27,12 +28,6 @@ export const DEFAULT_SYMLINK_DIRS = [
 	"__pycache__",
 	".pnpm-store",
 	".yarn",
-	"target", // Rust
-	"build",
-	"dist",
-	".next",
-	".nuxt",
-	".output",
 	".cache",
 ];
 
@@ -165,10 +160,15 @@ export async function createSandbox(options: SandboxOptions): Promise<SandboxRes
 				const stat = lstatSync(originalPath);
 
 				if (stat.isSymbolicLink()) {
-					// Copy the symlink target if it points within the project
+					// Validate and copy symlink only if target exists
 					const target = readlinkSync(originalPath);
-					symlinkSync(target, sandboxPath);
-					symlinksCreated++;
+					const resolvedTarget = join(dirname(originalPath), target);
+					if (existsSync(resolvedTarget)) {
+						symlinkSync(target, sandboxPath);
+						symlinksCreated++;
+					} else {
+						logDebug(`Agent ${agentNum}: Skipping broken symlink ${item} -> ${target}`);
+					}
 				} else if (stat.isDirectory()) {
 					// Copy directory recursively, preserving timestamps for change detection
 					cpSync(originalPath, sandboxPath, { recursive: true, preserveTimestamps: true });
