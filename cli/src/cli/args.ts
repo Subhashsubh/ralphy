@@ -13,7 +13,7 @@ export function createProgram(): Command {
   program
     .name("ralphy")
     .description(
-      "Autonomous AI Coding Loop - Supports Claude Code, OpenCode, Codex, Cursor, Qwen-Code and Factory Droid",
+      "Autonomous AI Coding Loop - Supports Claude Code, OpenCode, Codex, Cursor, Qwen-Code, Factory Droid and GitHub Copilot",
     )
     .version(VERSION)
     .argument("[task]", "Single task to execute (brownfield mode)")
@@ -29,11 +29,13 @@ export function createProgram(): Command {
     .option("--codex", "Use Codex")
     .option("--qwen", "Use Qwen-Code")
     .option("--droid", "Use Factory Droid")
+    .option("--copilot", "Use GitHub Copilot")
     .option("--dry-run", "Show what would be done without executing")
     .option("--max-iterations <n>", "Maximum iterations (0 = unlimited)", "0")
     .option("--max-retries <n>", "Maximum retries per task", "3")
     .option("--retry-delay <n>", "Delay between retries in seconds", "5")
     .option("--parallel", "Run tasks in parallel using worktrees")
+    .option("--sandbox", "Use lightweight sandboxes instead of git worktrees (faster for large repos)")
     .option("--max-parallel <n>", "Maximum parallel agents", "3")
     .option("--branch-per-task", "Create a branch for each task")
     .option("--base-branch <branch>", "Base branch for PRs")
@@ -53,7 +55,8 @@ export function createProgram(): Command {
       "--no-merge",
       "Skip automatic branch merging after parallel execution",
     )
-    .option("-v, --verbose", "Verbose output");
+    .option("-v, --verbose", "Verbose output")
+    .allowUnknownOption();
 
   return program;
 }
@@ -68,8 +71,18 @@ export function parseArgs(args: string[]): {
   showConfig: boolean;
   addRule: string | undefined;
 } {
+  // Find the -- separator and extract engine-specific arguments
+  const separatorIndex = args.indexOf("--");
+  let engineArgs: string[] = [];
+  let ralphyArgs = args;
+
+  if (separatorIndex !== -1) {
+    engineArgs = args.slice(separatorIndex + 1);
+    ralphyArgs = args.slice(0, separatorIndex);
+  }
+
   const program = createProgram();
-  program.parse(args);
+  program.parse(ralphyArgs);
 
   const opts = program.opts();
   const [task] = program.args;
@@ -82,6 +95,7 @@ export function parseArgs(args: string[]): {
   else if (opts.codex) aiEngine = "codex";
   else if (opts.qwen) aiEngine = "qwen";
   else if (opts.droid) aiEngine = "droid";
+  else if (opts.copilot) aiEngine = "copilot";
 
   // Determine model override (--sonnet is shortcut for --model sonnet)
   const modelOverride = opts.sonnet ? "sonnet" : opts.model || undefined;
@@ -148,6 +162,8 @@ export function parseArgs(args: string[]): {
           : "auto",
     modelOverride,
     skipMerge: opts.merge === false,
+    useSandbox: opts.sandbox || false,
+    engineArgs,
   };
 
   return {

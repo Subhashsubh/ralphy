@@ -8,14 +8,17 @@ import {
 import type { AIResult, EngineOptions, ProgressCallback } from "./types.ts";
 
 /**
- * Cursor Agent AI Engine
+ * GitHub Copilot CLI AI Engine
  */
-export class CursorEngine extends BaseAIEngine {
-	name = "Cursor Agent";
-	cliCommand = "agent";
+export class CopilotEngine extends BaseAIEngine {
+	name = "GitHub Copilot";
+	cliCommand = "copilot";
 
-	async execute(prompt: string, workDir: string, options?: EngineOptions): Promise<AIResult> {
-		const args = ["--print", "--force", "--output-format", "stream-json"];
+	/**
+	 * Build command arguments for Copilot CLI
+	 */
+	private buildArgs(prompt: string, options?: EngineOptions): string[] {
+		const args = ["-p", prompt];
 		if (options?.modelOverride) {
 			args.push("--model", options.modelOverride);
 		}
@@ -23,9 +26,15 @@ export class CursorEngine extends BaseAIEngine {
 		if (options?.engineArgs && options.engineArgs.length > 0) {
 			args.push(...options.engineArgs);
 		}
-		args.push(prompt);
+		return args;
+	}
 
+	async execute(prompt: string, workDir: string, options?: EngineOptions): Promise<AIResult> {
+		const args = this.buildArgs(prompt, options);
+
+		const startTime = Date.now();
 		const { stdout, stderr, exitCode } = await execCommand(this.cliCommand, args, workDir);
+		const durationMs = Date.now() - startTime;
 
 		const output = stdout + stderr;
 
@@ -41,50 +50,38 @@ export class CursorEngine extends BaseAIEngine {
 			};
 		}
 
-		// Parse Cursor output
-		const { response, durationMs } = this.parseOutput(output);
+		// Parse Copilot output - extract response from output
+		const response = this.parseOutput(output);
 
 		return {
 			success: exitCode === 0,
 			response,
-			inputTokens: 0, // Cursor doesn't provide token counts
+			inputTokens: 0, // Copilot CLI doesn't expose token counts in programmatic mode
 			outputTokens: 0,
 			cost: durationMs > 0 ? `duration:${durationMs}` : undefined,
 		};
 	}
 
-	private parseOutput(output: string): { response: string; durationMs: number } {
+	private parseOutput(output: string): string {
+		// Copilot CLI may output text responses
+		// Extract the meaningful response, filtering out control characters and prompts
+		// Note: These filter patterns are specific to current Copilot CLI behavior
+		// and may need updates if the CLI output format changes
 		const lines = output.split("\n").filter(Boolean);
-		let response = "";
-		let durationMs = 0;
 
-		for (const line of lines) {
-			try {
-				const parsed = JSON.parse(line);
+		// Filter out empty lines and common CLI artifacts
+		const meaningfulLines = lines.filter((line) => {
+			const trimmed = line.trim();
+			return (
+				trimmed &&
+				!trimmed.startsWith("?") && // Interactive prompts
+				!trimmed.startsWith("❯") && // Command prompts
+				!trimmed.includes("Thinking...") && // Status messages
+				!trimmed.includes("Working on it...") // Status messages
+			);
+		});
 
-				// Check result line
-				if (parsed.type === "result") {
-					response = parsed.result || "Task completed";
-					if (typeof parsed.duration_ms === "number") {
-						durationMs = parsed.duration_ms;
-					}
-				}
-
-				// Check assistant message as fallback
-				if (parsed.type === "assistant" && !response) {
-					const content = parsed.message?.content;
-					if (Array.isArray(content) && content[0]?.text) {
-						response = content[0].text;
-					} else if (typeof content === "string") {
-						response = content;
-					}
-				}
-			} catch {
-				// Ignore non-JSON lines
-			}
-		}
-
-		return { response: response || "Task completed", durationMs };
+		return meaningfulLines.join("\n") || "Task completed";
 	}
 
 	async executeStreaming(
@@ -93,17 +90,10 @@ export class CursorEngine extends BaseAIEngine {
 		onProgress: ProgressCallback,
 		options?: EngineOptions,
 	): Promise<AIResult> {
-		const args = ["--print", "--force", "--output-format", "stream-json"];
-		if (options?.modelOverride) {
-			args.push("--model", options.modelOverride);
-		}
-		// Add any additional engine-specific arguments
-		if (options?.engineArgs && options.engineArgs.length > 0) {
-			args.push(...options.engineArgs);
-		}
-		args.push(prompt);
+		const args = this.buildArgs(prompt, options);
 
 		const outputLines: string[] = [];
+		const startTime = Date.now();
 
 		const { exitCode } = await execCommandStreaming(this.cliCommand, args, workDir, (line) => {
 			outputLines.push(line);
@@ -115,6 +105,7 @@ export class CursorEngine extends BaseAIEngine {
 			}
 		});
 
+		const durationMs = Date.now() - startTime;
 		const output = outputLines.join("\n");
 
 		// Check for errors
@@ -129,8 +120,8 @@ export class CursorEngine extends BaseAIEngine {
 			};
 		}
 
-		// Parse Cursor output
-		const { response, durationMs } = this.parseOutput(output);
+		// Parse Copilot output
+		const response = this.parseOutput(output);
 
 		return {
 			success: exitCode === 0,

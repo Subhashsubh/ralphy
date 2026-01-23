@@ -4,6 +4,7 @@ export * from "./markdown-folder.ts";
 export * from "./yaml.ts";
 export * from "./json.ts";
 export * from "./github.ts";
+export * from "./cached-task-source.ts";
 
 import { GitHubTaskSource } from "./github.ts";
 import { JsonTaskSource } from "./json.ts";

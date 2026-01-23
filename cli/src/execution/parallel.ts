@@ -6,9 +6,10 @@ import type { AIEngine, AIResult } from "../engines/types.ts";
 import { getCurrentBranch, returnToBaseBranch } from "../git/branch.ts";
 import {
 	abortMerge,
-	createIntegrationBranch,
+	analyzePreMerge,
 	deleteLocalBranch,
 	mergeAgentBranch,
+	sortByConflictLikelihood,
 } from "../git/merge.ts";
 import { cleanupAgentWorktree, createAgentWorktree, getWorktreeBase } from "../git/worktree.ts";
 import type { Task, TaskSource } from "../tasks/types.ts";
@@ -16,15 +17,25 @@ import { logDebug, logError, logInfo, logSuccess, logWarn } from "../ui/logger.t
 import { notifyTaskComplete, notifyTaskFailed } from "../ui/notify.ts";
 import { resolveConflictsWithAI } from "./conflict-resolution.ts";
 import { buildParallelPrompt } from "./prompt.ts";
-import { isRetryableError, sleep, withRetry } from "./retry.ts";
+import { isRetryableError, withRetry } from "./retry.ts";
+import {
+	cleanupSandbox,
+	createSandbox,
+	getModifiedFiles,
+	getSandboxBase,
+} from "./sandbox.ts";
+import { commitSandboxChanges } from "./sandbox-git.ts";
 import type { ExecutionOptions, ExecutionResult } from "./sequential.ts";
 
 interface ParallelAgentResult {
 	task: Task;
+	agentNum: number;
 	worktreeDir: string;
 	branchName: string;
 	result: AIResult | null;
 	error?: string;
+	/** Whether this agent used sandbox mode */
+	usedSandbox?: boolean;
 }
 
 /**
@@ -46,6 +57,7 @@ async function runAgentInWorktree(
 	skipLint: boolean,
 	browserEnabled: "auto" | "true" | "false",
 	modelOverride?: string,
+	engineArgs?: string[],
 ): Promise<ParallelAgentResult> {
 	let worktreeDir = "";
 	let branchName = "";
@@ -95,7 +107,10 @@ async function runAgentInWorktree(
 		});
 
 		// Execute with retry
-		const engineOptions = modelOverride ? { modelOverride } : undefined;
+		const engineOptions = {
+			...(modelOverride && { modelOverride }),
+			...(engineArgs && engineArgs.length > 0 && { engineArgs }),
+		};
 		const result = await withRetry(
 			async () => {
 				const res = await engine.execute(prompt, worktreeDir, engineOptions);
@@ -107,15 +122,116 @@ async function runAgentInWorktree(
 			{ maxRetries, retryDelay },
 		);
 
-		return { task, worktreeDir, branchName, result };
+		return { task, agentNum, worktreeDir, branchName, result };
 	} catch (error) {
 		const errorMsg = error instanceof Error ? error.message : String(error);
-		return { task, worktreeDir, branchName, result: null, error: errorMsg };
+		return { task, agentNum, worktreeDir, branchName, result: null, error: errorMsg };
 	}
 }
 
 /**
- * Run tasks in parallel using worktrees
+ * Run a single agent in a lightweight sandbox.
+ *
+ * Sandboxes use symlinks for read-only dependencies (node_modules, .git, etc.)
+ * and copy source files. This is much faster than git worktrees for large repos.
+ */
+async function runAgentInSandbox(
+	engine: AIEngine,
+	task: Task,
+	agentNum: number,
+	sandboxBase: string,
+	originalDir: string,
+	prdSource: string,
+	prdFile: string,
+	prdIsFolder: boolean,
+	maxRetries: number,
+	retryDelay: number,
+	skipTests: boolean,
+	skipLint: boolean,
+	browserEnabled: "auto" | "true" | "false",
+	modelOverride?: string,
+	engineArgs?: string[],
+): Promise<ParallelAgentResult> {
+	const uniqueSuffix = Math.random().toString(36).substring(2, 8);
+	const sandboxDir = join(sandboxBase, `agent-${agentNum}-${uniqueSuffix}`);
+	let branchName = "";
+
+	try {
+		// Create sandbox
+		const sandboxResult = await createSandbox({
+			originalDir,
+			sandboxDir,
+			agentNum,
+		});
+
+		logDebug(
+			`Agent ${agentNum}: Created sandbox (${sandboxResult.symlinksCreated} symlinks, ${sandboxResult.filesCopied} copies)`,
+		);
+
+		// Copy PRD file or folder to sandbox (same as worktree mode)
+		if (prdSource === "markdown" || prdSource === "yaml") {
+			const srcPath = join(originalDir, prdFile);
+			const destPath = join(sandboxDir, prdFile);
+			if (existsSync(srcPath)) {
+				copyFileSync(srcPath, destPath);
+			}
+		} else if (prdSource === "markdown-folder" && prdIsFolder) {
+			const srcPath = join(originalDir, prdFile);
+			const destPath = join(sandboxDir, prdFile);
+			if (existsSync(srcPath)) {
+				cpSync(srcPath, destPath, { recursive: true });
+			}
+		}
+
+		// Ensure .ralphy/ exists in sandbox
+		const ralphyDir = join(sandboxDir, RALPHY_DIR);
+		if (!existsSync(ralphyDir)) {
+			mkdirSync(ralphyDir, { recursive: true });
+		}
+
+		// Build prompt
+		const prompt = buildParallelPrompt({
+			task: task.title,
+			progressFile: PROGRESS_FILE,
+			skipTests,
+			skipLint,
+			browserEnabled,
+			allowCommit: false,
+		});
+
+		// Execute with retry
+		const engineOptions = {
+			...(modelOverride && { modelOverride }),
+			...(engineArgs && engineArgs.length > 0 && { engineArgs }),
+		};
+		const result = await withRetry(
+			async () => {
+				const res = await engine.execute(prompt, sandboxDir, engineOptions);
+				if (!res.success && res.error && isRetryableError(res.error)) {
+					throw new Error(res.error);
+				}
+				return res;
+			},
+			{ maxRetries, retryDelay },
+		);
+
+		return { task, agentNum, worktreeDir: sandboxDir, branchName, result, usedSandbox: true };
+	} catch (error) {
+		const errorMsg = error instanceof Error ? error.message : String(error);
+		return {
+			task,
+			agentNum,
+			worktreeDir: sandboxDir,
+			branchName,
+			result: null,
+			error: errorMsg,
+			usedSandbox: true,
+		};
+	}
+}
+
+/**
+ * Run tasks in parallel using worktrees or sandboxes
  */
 export async function runParallel(
 	options: ExecutionOptions & {
@@ -143,6 +259,8 @@ export async function runParallel(
 		browserEnabled,
 		modelOverride,
 		skipMerge,
+		useSandbox = false,
+		engineArgs,
 	} = options;
 
 	const result: ExecutionResult = {
@@ -152,9 +270,13 @@ export async function runParallel(
 		totalOutputTokens: 0,
 	};
 
-	// Get worktree base directory
-	const worktreeBase = getWorktreeBase(workDir);
-	logDebug(`Worktree base: ${worktreeBase}`);
+	// Get base directory for worktrees or sandboxes
+	const isolationBase = useSandbox ? getSandboxBase(workDir) : getWorktreeBase(workDir);
+	logDebug(`${useSandbox ? "Sandbox" : "Worktree"} base: ${isolationBase}`);
+
+	if (useSandbox) {
+		logInfo("Using lightweight sandbox mode (faster for large repos)");
+	}
 
 	// Save starting branch to restore after merge phase
 	const startingBranch = await getCurrentBranch(workDir);
@@ -181,6 +303,7 @@ export async function runParallel(
 		// Get tasks for this batch
 		let tasks: Task[] = [];
 
+		// Check if task source supports parallel groups (YAML, JSON sources)
 		const taskSourceWithGroups = taskSource as TaskSource & {
 			getParallelGroup?: (title: string) => Promise<number>;
 			getTasksInGroup?: (group: number) => Promise<Task[]>;
@@ -217,15 +340,36 @@ export async function runParallel(
 			continue;
 		}
 
-		// Run agents in parallel
+		// Run agents in parallel (using sandbox or worktree mode)
 		const promises = batch.map((task) => {
 			globalAgentNum++;
+
+			if (useSandbox) {
+				return runAgentInSandbox(
+					engine,
+					task,
+					globalAgentNum,
+					isolationBase,
+					workDir,
+					prdSource,
+					prdFile,
+					prdIsFolder,
+					maxRetries,
+					retryDelay,
+					skipTests,
+					skipLint,
+					browserEnabled,
+					modelOverride,
+					engineArgs,
+				);
+			}
+
 			return runAgentInWorktree(
 				engine,
 				task,
 				globalAgentNum,
 				baseBranch,
-				worktreeBase,
+				isolationBase,
 				workDir,
 				prdSource,
 				prdFile,
@@ -236,20 +380,60 @@ export async function runParallel(
 				skipLint,
 				browserEnabled,
 				modelOverride,
+				engineArgs,
 			);
 		});
 
 		const results = await Promise.all(promises);
 
-		// Process results
-		for (const agentResult of results) {
-			const { task, worktreeDir, branchName, result: aiResult, error } = agentResult;
+		// Process results and collect worktrees for parallel cleanup
+		const worktreesToCleanup: Array<{ worktreeDir: string; branchName: string }> = [];
 
-			if (error) {
-				logError(`Task "${task.title}" failed: ${error}`);
+		for (const agentResult of results) {
+			const {
+				task,
+				agentNum,
+				worktreeDir,
+				result: aiResult,
+				error,
+				usedSandbox: agentUsedSandbox,
+			} = agentResult;
+			let branchName = agentResult.branchName;
+			let failureReason: string | undefined = error;
+			let preserveSandbox = false;
+
+			if (!failureReason && aiResult?.success && agentUsedSandbox && worktreeDir) {
+				try {
+					const modifiedFiles = await getModifiedFiles(worktreeDir, workDir);
+					if (modifiedFiles.length > 0) {
+						const commitResult = await commitSandboxChanges(
+							workDir,
+							modifiedFiles,
+							worktreeDir,
+							task.title,
+							agentNum,
+							originalBaseBranch,
+						);
+
+						if (commitResult.success) {
+							branchName = commitResult.branchName;
+							logDebug(`Agent ${agentNum}: Committed ${commitResult.filesCommitted} files to ${branchName}`);
+						} else {
+							failureReason = commitResult.error || "Failed to commit sandbox changes";
+							preserveSandbox = true; // Preserve work for manual recovery
+						}
+					}
+				} catch (commitErr) {
+					failureReason = commitErr instanceof Error ? commitErr.message : String(commitErr);
+					preserveSandbox = true; // Preserve work for manual recovery
+				}
+			}
+
+			if (failureReason) {
+				logError(`Task "${task.title}" failed: ${failureReason}`);
 				logTaskProgress(task.title, "failed", workDir);
 				result.tasksFailed++;
-				notifyTaskFailed(task.title, error);
+				notifyTaskFailed(task.title, failureReason);
 			} else if (aiResult?.success) {
 				logSuccess(`Task "${task.title}" completed`);
 				result.totalInputTokens += aiResult.inputTokens;
@@ -270,12 +454,40 @@ export async function runParallel(
 				logTaskProgress(task.title, "failed", workDir);
 				result.tasksFailed++;
 				notifyTaskFailed(task.title, errMsg);
+				failureReason = errMsg;
 			}
 
-			// Cleanup worktree
+			// Cleanup sandbox inline or collect worktree for parallel cleanup
 			if (worktreeDir) {
-				const cleanup = await cleanupAgentWorktree(worktreeDir, branchName, workDir);
-				if (cleanup.leftInPlace) {
+				if (agentUsedSandbox) {
+					if (failureReason || preserveSandbox) {
+						logWarn(`Sandbox preserved for manual review: ${worktreeDir}`);
+					} else {
+						// Sandbox cleanup is simpler - just delete the directory
+						await cleanupSandbox(worktreeDir);
+						logDebug(`Cleaned up sandbox: ${worktreeDir}`);
+					}
+				} else {
+					// Collect worktree for parallel cleanup below
+					worktreesToCleanup.push({ worktreeDir, branchName });
+				}
+			}
+		}
+
+		// Cleanup all worktrees in parallel
+		if (worktreesToCleanup.length > 0) {
+			const cleanupResults = await Promise.all(
+				worktreesToCleanup.map(({ worktreeDir, branchName }) =>
+					cleanupAgentWorktree(worktreeDir, branchName, workDir).then((cleanup) => ({
+						worktreeDir,
+						leftInPlace: cleanup.leftInPlace,
+					})),
+				),
+			);
+
+			// Log any worktrees left in place
+			for (const { worktreeDir, leftInPlace } of cleanupResults) {
+				if (leftInPlace) {
 					logInfo(`Worktree left in place (uncommitted changes): ${worktreeDir}`);
 				}
 			}
@@ -290,6 +502,7 @@ export async function runParallel(
 			engine,
 			workDir,
 			modelOverride,
+			engineArgs,
 		);
 
 		// Restore starting branch if we're not already on it
@@ -304,7 +517,13 @@ export async function runParallel(
 }
 
 /**
- * Merge completed branches back to the base branch
+ * Merge completed branches back to the base branch.
+ *
+ * Optimized merge phase:
+ * 1. Parallel pre-merge analysis (git diff doesn't require locks)
+ * 2. Sort branches by conflict likelihood (merge clean ones first)
+ * 3. Sequential merges (git locking requirement)
+ * 4. Parallel branch deletion
  */
 async function mergeCompletedBranches(
 	branches: string[],
@@ -312,6 +531,7 @@ async function mergeCompletedBranches(
 	engine: AIEngine,
 	workDir: string,
 	modelOverride?: string,
+	engineArgs?: string[],
 ): Promise<void> {
 	if (branches.length === 0) {
 		return;
@@ -319,11 +539,30 @@ async function mergeCompletedBranches(
 
 	logInfo(`\nMerge phase: merging ${branches.length} branch(es) into ${targetBranch}`);
 
+	// Stage 1: Parallel pre-merge analysis
+	// Run git diff for all branches in parallel (doesn't require locks)
+	logDebug("Analyzing branches for potential conflicts...");
+	const analyses = await Promise.all(
+		branches.map((branch) => analyzePreMerge(branch, targetBranch, workDir)),
+	);
+
+	// Stage 2: Sort by conflict likelihood (merge clean ones first)
+	// This reduces the chance of early conflicts blocking later clean merges
+	const sortedAnalyses = sortByConflictLikelihood(analyses);
+	const sortedBranches = sortedAnalyses.map((a) => a.branch);
+
+	if (sortedBranches[0] !== branches[0]) {
+		logDebug("Reordered branches to minimize conflicts");
+	}
+
+	// Stage 3: Sequential merges (git operations require this)
 	const merged: string[] = [];
 	const failed: string[] = [];
 
-	for (const branch of branches) {
-		logInfo(`Merging ${branch}...`);
+	for (const branch of sortedBranches) {
+		const analysis = analyses.find((a) => a.branch === branch);
+		const fileCount = analysis?.fileCount ?? 0;
+		logInfo(`Merging ${branch}... (${fileCount} file${fileCount === 1 ? "" : "s"} changed)`);
 
 		const mergeResult = await mergeAgentBranch(branch, targetBranch, workDir);
 
@@ -340,6 +579,7 @@ async function mergeCompletedBranches(
 				branch,
 				workDir,
 				modelOverride,
+				engineArgs,
 			);
 
 			if (resolved) {
@@ -356,11 +596,20 @@ async function mergeCompletedBranches(
 		}
 	}
 
-	// Delete successfully merged branches
-	for (const branch of merged) {
-		const deleted = await deleteLocalBranch(branch, workDir, true);
-		if (deleted) {
-			logDebug(`Deleted merged branch: ${branch}`);
+	// Stage 4: Parallel branch deletion
+	// Delete all successfully merged branches in parallel
+	if (merged.length > 0) {
+		const deleteResults = await Promise.all(
+			merged.map(async (branch) => {
+				const deleted = await deleteLocalBranch(branch, workDir, true);
+				return { branch, deleted };
+			}),
+		);
+
+		for (const { branch, deleted } of deleteResults) {
+			if (deleted) {
+				logDebug(`Deleted merged branch: ${branch}`);
+			}
 		}
 	}
 
