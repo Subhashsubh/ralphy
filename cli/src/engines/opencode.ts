@@ -1,6 +1,8 @@
 import { BaseAIEngine, checkForErrors, execCommand } from "./base.ts";
 import type { AIResult, EngineOptions } from "./types.ts";
 
+const isWindows = process.platform === "win32";
+
 /**
  * OpenCode AI Engine
  */
@@ -17,11 +19,22 @@ export class OpenCodeEngine extends BaseAIEngine {
 		if (options?.engineArgs && options.engineArgs.length > 0) {
 			args.push(...options.engineArgs);
 		}
-		args.push(prompt);
 
-		const { stdout, stderr, exitCode } = await execCommand(this.cliCommand, args, workDir, {
-			OPENCODE_PERMISSION: '{"*":"allow"}',
-		});
+		// On Windows, pass prompt via stdin to avoid cmd.exe argument parsing issues with multi-line content
+		let stdinContent: string | undefined;
+		if (isWindows) {
+			stdinContent = prompt;
+		} else {
+			args.push(prompt);
+		}
+
+		const { stdout, stderr, exitCode } = await execCommand(
+			this.cliCommand,
+			args,
+			workDir,
+			{ OPENCODE_PERMISSION: '{"*":"allow"}' },
+			stdinContent,
+		);
 
 		const output = stdout + stderr;
 
