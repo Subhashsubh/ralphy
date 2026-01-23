@@ -318,8 +318,7 @@ export async function runParallel(
 			// In dry-run mode, find the first task not already processed
 			let nextTask = await taskSource.getNextTask();
 			while (nextTask && dryRun && dryRunProcessedIds.has(nextTask.id)) {
-				// Skip to find an unprocessed task - mark this one and get next
-				dryRunProcessedIds.add(nextTask.id);
+				// Skip to find an unprocessed task
 				const allTasks = await taskSource.getAllTasks();
 				nextTask = allTasks.find((t) => !dryRunProcessedIds.has(t.id)) || null;
 			}
