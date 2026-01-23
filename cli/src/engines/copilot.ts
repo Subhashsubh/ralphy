@@ -14,7 +14,11 @@ const isWindows = process.platform === "win32";
  * Note: executeStreaming is intentionally not implemented for Copilot
  * because the streaming function can hang on Windows due to how
  * Bun handles cmd.exe stream completion. The non-streaming execute()
- * method works reliably and Copilot provides its own --stream=on output.
+ * method works reliably.
+ *
+ * Note: All engine output is captured internally for parsing and not displayed
+ * to the end user. This is by design - the spinner shows step progress while
+ * the actual CLI output is processed silently.
  */
 export class CopilotEngine extends BaseAIEngine {
 	name = "GitHub Copilot";
@@ -52,9 +56,6 @@ export class CopilotEngine extends BaseAIEngine {
 
 		// Use --yolo for non-interactive mode (allows all tools and paths)
 		args.push("--yolo");
-
-		// Enable streaming for better progress reporting (use = syntax to avoid arg splitting)
-		args.push("--stream=on");
 
 		// Sanitize and pass prompt as argument
 		const sanitizedPrompt = this.sanitizePrompt(prompt);
