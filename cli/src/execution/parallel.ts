@@ -317,8 +317,7 @@ export async function runParallel(
 		if (isYamlSource) {
 			// In dry-run mode, find the first task not already processed
 			let nextTask = await taskSource.getNextTask();
-			while (nextTask && dryRun && dryRunProcessedIds.has(nextTask.id)) {
-				// Skip to find an unprocessed task
+			if (dryRun && nextTask && dryRunProcessedIds.has(nextTask.id)) {
 				const allTasks = await taskSource.getAllTasks();
 				nextTask = allTasks.find((t) => !dryRunProcessedIds.has(t.id)) || null;
 			}
