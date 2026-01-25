@@ -55,7 +55,7 @@ export class JsonTaskSource implements TaskSource {
 			}
 			titles.add(task.title);
 		}
-		return (data.tasks || [])
+		return data.tasks
 			.filter((task) => !task.completed)
 			.map((task) => ({
 				id: task.title,
