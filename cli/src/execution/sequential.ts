@@ -9,7 +9,7 @@ import { notifyTaskComplete, notifyTaskFailed } from "../ui/notify.ts";
 import { ProgressSpinner } from "../ui/spinner.ts";
 import { clearDeferredTask, recordDeferredTask } from "./deferred.ts";
 import { buildPrompt } from "./prompt.ts";
-import { isRetryableError, sleep, withRetry } from "./retry.ts";
+import { isFatalError, isRetryableError, sleep, withRetry } from "./retry.ts";
 
 export interface ExecutionOptions {
 	engine: AIEngine;
@@ -220,11 +220,21 @@ export async function runSequential(options: ExecutionOptions): Promise<Executio
 							result.tasksFailed++;
 							abortDueToRetryableFailure = true;
 						}
+					} else if (isFatalError(errMsg)) {
+						// Fatal error (auth, config) - abort all remaining tasks
+						spinner.error(errMsg);
+						logError(`Fatal error: ${errMsg}`);
+						logError("Aborting remaining tasks due to configuration/authentication issue.");
+						result.tasksFailed++;
+						notifyTaskFailed(task.title, errMsg);
+						return result; // Exit immediately
 					} else {
 						spinner.error(errMsg);
 						logTaskProgress(task.title, "failed", workDir);
 						result.tasksFailed++;
 						notifyTaskFailed(task.title, errMsg);
+						// Mark task complete so we don't retry it infinitely
+						await taskSource.markComplete(task.id);
 						clearDeferredTask(taskSource.type, task, workDir, options.prdFile);
 					}
 				}
@@ -245,11 +255,21 @@ export async function runSequential(options: ExecutionOptions): Promise<Executio
 						result.tasksFailed++;
 						abortDueToRetryableFailure = true;
 					}
+				} else if (isFatalError(errorMsg)) {
+					// Fatal error (auth, config) - abort all remaining tasks
+					spinner.error(errorMsg);
+					logError(`Fatal error: ${errorMsg}`);
+					logError("Aborting remaining tasks due to configuration/authentication issue.");
+					result.tasksFailed++;
+					notifyTaskFailed(task.title, errorMsg);
+					return result; // Exit immediately
 				} else {
 					spinner.error(errorMsg);
 					logTaskProgress(task.title, "failed", workDir);
 					result.tasksFailed++;
 					notifyTaskFailed(task.title, errorMsg);
+					// Mark task complete so we don't retry it infinitely
+					await taskSource.markComplete(task.id);
 					clearDeferredTask(taskSource.type, task, workDir, options.prdFile);
 				}
 			}
