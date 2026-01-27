@@ -1,17 +1,17 @@
-import {
-	BaseAIEngine,
-	checkForErrors,
-	execCommand,
-	formatCommandError,
-} from "./base.ts";
+import { randomUUID } from "node:crypto";
+import { mkdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { logDebug } from "../ui/logger.ts";
+import { BaseAIEngine, checkForErrors, execCommand, formatCommandError } from "./base.ts";
 import type { AIResult, EngineOptions } from "./types.ts";
 
-const isWindows = process.platform === "win32";
+/** Directory for temporary prompt files */
+const TEMP_DIR = join(tmpdir(), "ralphy-copilot");
 
 /**
  * GitHub Copilot CLI AI Engine
- * 
+ *
  * Note: executeStreaming is intentionally not implemented for Copilot
  * because the streaming function can hang on Windows due to how
  * Bun handles cmd.exe stream completion. The non-streaming execute()
@@ -20,46 +20,61 @@ const isWindows = process.platform === "win32";
  * Note: All engine output is captured internally for parsing and not displayed
  * to the end user. This is by design - the spinner shows step progress while
  * the actual CLI output is processed silently.
+ *
+ * Note: Prompts are passed via temporary files to preserve markdown formatting.
+ * The -p parameter accepts a file path, which avoids shell escaping issues and
+ * maintains the full structure of markdown (newlines, code blocks, etc.) that
+ * would be lost if passed as a command line string.
  */
 export class CopilotEngine extends BaseAIEngine {
 	name = "GitHub Copilot";
 	cliCommand = "copilot";
 
 	/**
-	 * Sanitize prompt for command line.
-	 * On Windows, newlines cause issues with cmd.exe argument parsing.
-	 * We flatten the prompt to a single line.
-	 *
-	 * Note: When Bun spawns via cmd.exe /c, arguments containing spaces are
-	 * automatically wrapped in double quotes. Inside quoted strings, cmd.exe
-	 * does NOT interpret &, |, <, >, ^ as special characters. Only double
-	 * quotes need escaping (by doubling them).
+	 * Create a temporary file containing the prompt.
+	 * Uses a unique filename to support parallel execution.
+	 * @returns The path to the temporary prompt file
 	 */
-	private sanitizePrompt(prompt: string): string {
-		// Replace all newlines with spaces, collapse multiple spaces
-		let sanitized = prompt.replace(/\r?\n/g, " ").replace(/\s+/g, " ").trim();
+	private createPromptFile(prompt: string): string {
+		// Ensure temp directory exists
+		mkdirSync(TEMP_DIR, { recursive: true });
 
-		if (isWindows) {
-			// Inside double-quoted strings, only double quotes need escaping
-			// cmd.exe interprets "" as a literal " within quoted arguments
-			sanitized = sanitized.replace(/"/g, '""');
+		// Generate unique filename using UUID for parallel safety
+		const filename = `prompt-${randomUUID()}.md`;
+		const filepath = join(TEMP_DIR, filename);
+
+		// Write prompt to file preserving all formatting
+		writeFileSync(filepath, prompt, "utf-8");
+		logDebug(`[Copilot] Created prompt file: ${filepath}`);
+
+		return filepath;
+	}
+
+	/**
+	 * Clean up a temporary prompt file
+	 */
+	private cleanupPromptFile(filepath: string): void {
+		try {
+			unlinkSync(filepath);
+			logDebug(`[Copilot] Cleaned up prompt file: ${filepath}`);
+		} catch (err) {
+			// Ignore cleanup errors - file may already be deleted
+			logDebug(`[Copilot] Failed to cleanup prompt file: ${filepath}`);
 		}
-
-		return sanitized;
 	}
 
 	/**
 	 * Build command arguments for Copilot CLI
+	 * @param promptFilePath Path to the temporary file containing the prompt
 	 */
-	private buildArgs(prompt: string, options?: EngineOptions): { args: string[] } {
+	private buildArgs(promptFilePath: string, options?: EngineOptions): { args: string[] } {
 		const args: string[] = [];
 
 		// Use --yolo for non-interactive mode (allows all tools and paths)
 		args.push("--yolo");
 
-		// Sanitize and pass prompt as argument
-		const sanitizedPrompt = this.sanitizePrompt(prompt);
-		args.push("-p", sanitizedPrompt);
+		// Pass prompt file path (Copilot CLI accepts file paths for -p)
+		args.push("-p", promptFilePath);
 
 		if (options?.modelOverride) {
 			args.push("--model", options.modelOverride);
@@ -72,71 +87,80 @@ export class CopilotEngine extends BaseAIEngine {
 	}
 
 	async execute(prompt: string, workDir: string, options?: EngineOptions): Promise<AIResult> {
-		const { args } = this.buildArgs(prompt, options);
+		// Create temporary prompt file to preserve markdown formatting
+		const promptFilePath = this.createPromptFile(prompt);
 
-		// Debug logging
-		logDebug(`[Copilot] Working directory: ${workDir}`);
-		logDebug(`[Copilot] Prompt length: ${prompt.length} chars`);
-		logDebug(`[Copilot] Prompt preview: ${prompt.substring(0, 200)}...`);
-		logDebug(`[Copilot] Command: ${this.cliCommand} ${args.join(" ").substring(0, 300)}...`);
+		try {
+			const { args } = this.buildArgs(promptFilePath, options);
 
-		const startTime = Date.now();
-		const { stdout, stderr, exitCode } = await execCommand(this.cliCommand, args, workDir);
-		const durationMs = Date.now() - startTime;
+			// Debug logging
+			logDebug(`[Copilot] Working directory: ${workDir}`);
+			logDebug(`[Copilot] Prompt length: ${prompt.length} chars`);
+			logDebug(`[Copilot] Prompt preview: ${prompt.substring(0, 200)}...`);
+			logDebug(`[Copilot] Prompt file: ${promptFilePath}`);
+			logDebug(`[Copilot] Command: ${this.cliCommand} ${args.join(" ")}`);
 
-		const output = stdout + stderr;
+			const startTime = Date.now();
+			const { stdout, stderr, exitCode } = await execCommand(this.cliCommand, args, workDir);
+			const durationMs = Date.now() - startTime;
 
-		// Debug logging
-		logDebug(`[Copilot] Exit code: ${exitCode}`);
-		logDebug(`[Copilot] Duration: ${durationMs}ms`);
-		logDebug(`[Copilot] Output length: ${output.length} chars`);
-		logDebug(`[Copilot] Output preview: ${output.substring(0, 500)}...`);
+			const output = stdout + stderr;
 
-		// Check for JSON errors (from base)
-		const jsonError = checkForErrors(output);
-		if (jsonError) {
+			// Debug logging
+			logDebug(`[Copilot] Exit code: ${exitCode}`);
+			logDebug(`[Copilot] Duration: ${durationMs}ms`);
+			logDebug(`[Copilot] Output length: ${output.length} chars`);
+			logDebug(`[Copilot] Output preview: ${output.substring(0, 500)}...`);
+
+			// Check for JSON errors (from base)
+			const jsonError = checkForErrors(output);
+			if (jsonError) {
+				return {
+					success: false,
+					response: "",
+					inputTokens: 0,
+					outputTokens: 0,
+					error: jsonError,
+				};
+			}
+
+			// Check for Copilot-specific errors (plain text)
+			const copilotError = this.checkCopilotErrors(output);
+			if (copilotError) {
+				return {
+					success: false,
+					response: "",
+					inputTokens: 0,
+					outputTokens: 0,
+					error: copilotError,
+				};
+			}
+
+			// Parse Copilot output - extract response and token counts
+			const { response, inputTokens, outputTokens } = this.parseOutput(output);
+
+			// If command failed with non-zero exit code, provide a meaningful error
+			if (exitCode !== 0) {
+				return {
+					success: false,
+					response,
+					inputTokens,
+					outputTokens,
+					error: formatCommandError(exitCode, output),
+				};
+			}
+
 			return {
-				success: false,
-				response: "",
-				inputTokens: 0,
-				outputTokens: 0,
-				error: jsonError,
-			};
-		}
-
-		// Check for Copilot-specific errors (plain text)
-		const copilotError = this.checkCopilotErrors(output);
-		if (copilotError) {
-			return {
-				success: false,
-				response: "",
-				inputTokens: 0,
-				outputTokens: 0,
-				error: copilotError,
-			};
-		}
-
-		// Parse Copilot output - extract response and token counts
-		const { response, inputTokens, outputTokens } = this.parseOutput(output);
-
-		// If command failed with non-zero exit code, provide a meaningful error
-		if (exitCode !== 0) {
-			return {
-				success: false,
+				success: true,
 				response,
 				inputTokens,
 				outputTokens,
-				error: formatCommandError(exitCode, output),
+				cost: durationMs > 0 ? `duration:${durationMs}` : undefined,
 			};
+		} finally {
+			// Always clean up the temporary prompt file
+			this.cleanupPromptFile(promptFilePath);
 		}
-
-		return {
-			success: true,
-			response,
-			inputTokens,
-			outputTokens,
-			cost: durationMs > 0 ? `duration:${durationMs}` : undefined,
-		};
 	}
 
 	/**
@@ -182,14 +206,14 @@ export class CopilotEngine extends BaseAIEngine {
 		const trimmed = str.trim().toLowerCase();
 		if (trimmed.endsWith("k")) {
 			const value = Number.parseFloat(trimmed.slice(0, -1));
-			return isNaN(value) ? 0 : Math.round(value * 1000);
+			return Number.isNaN(value) ? 0 : Math.round(value * 1000);
 		}
 		if (trimmed.endsWith("m")) {
 			const value = Number.parseFloat(trimmed.slice(0, -1));
-			return isNaN(value) ? 0 : Math.round(value * 1000000);
+			return Number.isNaN(value) ? 0 : Math.round(value * 1000000);
 		}
 		const value = Number.parseFloat(trimmed);
-		return isNaN(value) ? 0 : Math.round(value);
+		return Number.isNaN(value) ? 0 : Math.round(value);
 	}
 
 	/**
@@ -200,7 +224,7 @@ export class CopilotEngine extends BaseAIEngine {
 		// Look for the token count line in the "Breakdown by AI model" section
 		// Pattern: number followed by "in," and number followed by "out,"
 		const tokenMatch = output.match(/(\d+(?:\.\d+)?[km]?)\s+in,\s+(\d+(?:\.\d+)?[km]?)\s+out/i);
-		
+
 		if (tokenMatch) {
 			const inputTokens = this.parseTokenCount(tokenMatch[1]);
 			const outputTokens = this.parseTokenCount(tokenMatch[2]);
@@ -211,7 +235,11 @@ export class CopilotEngine extends BaseAIEngine {
 		return { inputTokens: 0, outputTokens: 0 };
 	}
 
-	private parseOutput(output: string): { response: string; inputTokens: number; outputTokens: number } {
+	private parseOutput(output: string): {
+		response: string;
+		inputTokens: number;
+		outputTokens: number;
+	} {
 		// Extract token counts first
 		const { inputTokens, outputTokens } = this.parseTokenCounts(output);
 
